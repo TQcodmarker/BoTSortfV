@@ -11,7 +11,7 @@ import torch
 
 from utils.file_read import read_all, ais_initial, update_time
 from utils.AIS_utils import AISPRO
-from utils.draw import DRAW
+from utils.draw import DRAW, draw as draw_info_panel, filter_inf, process_img
 
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -232,6 +232,46 @@ def targets_to_deepsorvf_frames(online_targets, AIS_vis, timestamp):
     return Vis_cur, Fus_tra
 
 
+def draw_deepsorvf_style_each_frame(drawer, pic, Vis_tra, Vis_cur, Fus_tra):
+    add_img = pic.copy()
+    df_draw = pd.DataFrame(columns=[
+        'ais', 'mmsi', 'sog', 'cog', 'lat', 'lon',
+        'box_x1', 'box_y1', 'box_x2', 'box_y2',
+        'inf_x1', 'inf_y1', 'inf_x2', 'inf_y2', 'color'
+    ])
+
+    if Vis_cur is not None and len(Vis_cur) > 0:
+        id_list = Vis_cur['ID'].unique()
+        for track_id in id_list:
+            id_current = Vis_tra[Vis_tra['ID'] == track_id].reset_index(drop=True)
+            last = len(id_current) - 1
+            if last == -1:
+                continue
+
+            x1 = int(max(id_current['x1'][last], 0))
+            y1 = int(max(id_current['y1'][last], 0))
+            x2 = int(min(id_current['x2'][last], drawer.w))
+            y2 = int(min(id_current['y2'][last], drawer.h))
+
+            fusion_current = pd.DataFrame()
+            if Fus_tra is not None and len(Fus_tra) > 0:
+                fusion_current = Fus_tra[Fus_tra['ID'] == id_current['ID'][last]].reset_index(drop=True)
+
+            if len(fusion_current) > 0:
+                df_draw = process_img(
+                    df_draw, x1, y1, x2, y2, fusion_current,
+                    drawer.w, drawer.h, drawer.w0, drawer.h0, Type=True)
+            else:
+                df_draw = process_img(
+                    df_draw, x1, y1, x2, y2, [],
+                    drawer.w, drawer.h, drawer.wn, drawer.hn, Type=False)
+
+    drawer.df_draw = filter_inf(
+        df_draw, drawer.w, drawer.h, drawer.w0, drawer.h0,
+        drawer.wn, drawer.hn, drawer.tf)
+    return draw_info_panel(add_img, drawer.df_draw, drawer.tf)
+
+
 def run(args):
     video_path, ais_path, result_video, result_metric, initial_time, camera_para = read_all(
         args.data_path, args.result_path)
@@ -310,7 +350,7 @@ def run(args):
         if len(Vis_cur) > 0:
             Vis_tra = pd.concat([Vis_tra, Vis_cur], ignore_index=True)
             Vis_tra = Vis_tra.drop(Vis_tra[Vis_tra['timestamp'] < (timestamp // 1000 - 2 * 60)].index)
-        result = DRA.draw_traj(im, AIS_vis, AIS_cur, Vis_tra, Vis_cur, Fus_tra, timestamp)
+        result = draw_deepsorvf_style_each_frame(DRA, im, Vis_tra, Vis_cur, Fus_tra)
         result = imutils.resize(result, height=args.show_size)
         if writer is None:
             fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
