@@ -56,6 +56,13 @@ def read_camera_para(path):
         return list(map(float, ast.literal_eval(f.readline().strip())))
 
 
+def read_oar_polygon(path):
+    if path is None:
+        return None
+    with open(path, 'r') as f:
+        return ast.literal_eval(f.readline().strip())
+
+
 def find_clip_video(data_path):
     for name in os.listdir(data_path):
         lower = name.lower()
@@ -146,13 +153,15 @@ def write_result_lines(path, lines):
 
 
 def run_experiment(args):
-    apply_ablation_mode(args)
-
     video_path = args.video_path or find_clip_video(args.data_path)
     ais_path = args.ais_path
     camera_para_path = args.camera_para_path or os.path.join(args.data_path, 'camera_para.txt')
-    if args.camera_para is None and camera_para_path and os.path.exists(camera_para_path):
+    if args.mode != 'botsort' and args.camera_para is None and camera_para_path and os.path.exists(camera_para_path):
         args.camera_para = read_camera_para(camera_para_path)
+    if args.oar_path is not None:
+        args.oar_polygon = read_oar_polygon(args.oar_path)
+    apply_ablation_mode(args)
+    ais_path = args.ais_path
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -310,6 +319,8 @@ def make_parser():
     parser.add_argument('--ais-path', default=None)
     parser.add_argument('--camera-para-path', default=None)
     parser.set_defaults(camera_para=None)
+    parser.add_argument('--oar-path', default=None)
+    parser.set_defaults(oar_polygon=None)
     parser.add_argument('--ais-max-age', dest='ais_max_age', type=float, default=2.0)
     parser.add_argument('--ais-kappa', dest='ais_kappa', type=float, default=0.5)
     parser.add_argument('--ais-position-var', dest='ais_position_var', type=float, default=4.0)
@@ -319,6 +330,8 @@ def make_parser():
     parser.add_argument('--ais-heading-weight', dest='ais_heading_weight', type=float, default=0.05)
     parser.add_argument('--ais-occlusion-min-score', dest='ais_occlusion_min_score', type=float, default=0.4)
     parser.add_argument('--ais-occlusion-max-frames', dest='ais_occlusion_max_frames', type=int, default=60)
+    parser.add_argument('--ais-cmc-mode', dest='ais_cmc_mode',
+                        choices=['none', 'same', 'inverse'], default='inverse')
 
     parser.add_argument('--fps', type=int, default=30)
     return parser
