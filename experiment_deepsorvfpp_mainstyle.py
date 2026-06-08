@@ -4,12 +4,14 @@ import sys
 import time
 
 import cv2
+import imutils
 import numpy as np
 import pandas as pd
 import torch
 
 from utils.file_read import read_all, ais_initial, update_time
 from utils.AIS_utils import AISPRO
+from utils.draw import DRAW
 
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -111,6 +113,13 @@ def ais_vis_to_records(AIS_vis, frame_timestamp_ms, max_age_sec):
     return records
 
 
+def empty_ais_dataframe():
+    return pd.DataFrame(columns=[
+        'mmsi', 'lon', 'lat', 'speed', 'course', 'heading',
+        'type', 'x', 'y', 'timestamp'
+    ])
+
+
 def apply_mode(args):
     if args.mode == 'botsort':
         args.ais_cost_weight = 0.0
@@ -164,53 +173,63 @@ def write_track_results(result_metric, frame_id, online_targets):
             write_line(fusion_path, fusion_line)
 
 
-def draw_deepsorvfpp(frame, AIS_vis, AIS_cur, online_targets, timestamp_ms, t):
-    img = frame.copy()
-    tl = max(round(0.002 * (frame.shape[0] + frame.shape[1]) / 2) + 1, 1)
-    font_scale = max(tl / 6.0, 0.45)
-    current_ais = {}
-
+def targets_to_deepsorvf_frames(online_targets, AIS_vis, timestamp):
+    vis_rows = []
+    fus_rows = []
+    ais_latest = {}
     if AIS_vis is not None and len(AIS_vis) > 0:
         for mmsi in AIS_vis['mmsi'].unique():
-            ais_traj = AIS_vis[AIS_vis['mmsi'] == mmsi].reset_index(drop=True)
-            for i in range(max(0, ais_traj.shape[0] - 1)):
-                p1 = (int(ais_traj['x'][i]), int(ais_traj['y'][i]))
-                p2 = (int(ais_traj['x'][i + 1]), int(ais_traj['y'][i + 1]))
-                cv2.line(img, p1, p2, (255, 0, 0), 2)
-            last = ais_traj.iloc[-1]
-            current_ais[last['mmsi']] = last
-            p = (int(last['x']), int(last['y']))
-            cv2.circle(img, p, 5, (255, 0, 0), -1)
-            cv2.putText(img, 'AIS:{}'.format(int(last['mmsi'])), (p[0] + 4, p[1] - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 0, 0), tl)
+            rows = AIS_vis[AIS_vis['mmsi'] == mmsi].reset_index(drop=True)
+            if len(rows) > 0:
+                ais_latest[int(mmsi)] = rows.iloc[-1]
 
     for target in online_targets:
         tlwh = target.tlwh
-        x, y, w, h = [int(v) for v in tlwh]
+        x1 = int(max(tlwh[0], 0))
+        y1 = int(max(tlwh[1], 0))
+        x2 = int(max(tlwh[0] + tlwh[2], 0))
+        y2 = int(max(tlwh[1] + tlwh[3], 0))
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
+        track_id = int(target.track_id)
+        ts_sec = int(timestamp // 1000)
+        vis_rows.append({
+            'ID': track_id, 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+            'x': cx, 'y': cy, 'timestamp': ts_sec
+        })
+
         ais_id = getattr(target, 'ais_id', None)
-        is_occ = getattr(target, 'state', None) is not None and str(getattr(target, 'state')) == '5'
-        color = (0, 255, 0) if ais_id is not None else (0, 0, 255)
-        if is_occ:
-            color = (0, 165, 255)
-        cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
+        if ais_id is None:
+            continue
+        try:
+            ais_id_int = int(ais_id)
+        except (TypeError, ValueError):
+            continue
+        if ais_id_int not in ais_latest:
+            continue
+        ais = ais_latest[ais_id_int]
+        fus_rows.append({
+            'ID': track_id,
+            'mmsi': ais_id_int,
+            'lon': ais['lon'],
+            'lat': ais['lat'],
+            'speed': ais['speed'],
+            'course': ais['course'],
+            'heading': ais['heading'],
+            'type': ais['type'],
+            'x1': x1,
+            'y1': y1,
+            'w': int(tlwh[2]),
+            'h': int(tlwh[3]),
+            'timestamp': int(ais['timestamp'])
+        })
 
-        label = 'T{}'.format(target.track_id)
-        if ais_id is not None:
-            label += '|MMSI:{}'.format(int(ais_id))
-        if is_occ:
-            label += '|OCC'
-        cv2.putText(img, label, (x, max(0, y - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, tl)
-
-        if ais_id in current_ais:
-            obs = current_ais[ais_id]
-            px, py = int(obs['x']), int(obs['y'])
-            cv2.circle(img, (px, py), 6, (0, 255, 255), -1)
-            cv2.line(img, (x + w // 2, y + h // 2), (px, py), (0, 255, 255), 1)
-
-    cv2.putText(img, 'Stamp:{}'.format(int(timestamp_ms)), (12, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), tl)
-    return img
+    Vis_cur = pd.DataFrame(vis_rows, columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'timestamp'])
+    Fus_tra = pd.DataFrame(fus_rows, columns=[
+        'ID', 'mmsi', 'lon', 'lat', 'speed', 'course', 'heading', 'type',
+        'x1', 'y1', 'w', 'h', 'timestamp'
+    ])
+    return Vis_cur, Fus_tra
 
 
 def run(args):
@@ -237,11 +256,13 @@ def run(args):
     Time = initial_time.copy()
 
     AIS = AISPRO(ais_path, ais_file, im_shape, t)
+    DRA = DRAW(im_shape, t)
     predictor = build_predictor(args)
     tracker = BoTSORT(args, frame_rate=fps)
 
     os.makedirs(os.path.dirname(result_video), exist_ok=True)
     writer = None
+    Vis_tra = pd.DataFrame(columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'timestamp'])
     frame_id = 0
     total_time = []
 
@@ -258,8 +279,8 @@ def run(args):
         Time, timestamp, Time_name = update_time(Time, t)
 
         if args.mode == 'botsort':
-            AIS_vis = pd.DataFrame()
-            AIS_cur = pd.DataFrame()
+            AIS_vis = empty_ais_dataframe()
+            AIS_cur = empty_ais_dataframe()
             ais_frame = []
         else:
             AIS_vis, AIS_cur = AIS.process(camera_para, timestamp, Time_name)
@@ -285,7 +306,12 @@ def run(args):
         write_detection_results(result_metric, frame_id, detections)
         write_track_results(result_metric, frame_id, filtered_targets)
 
-        result = draw_deepsorvfpp(im, AIS_vis, AIS_cur, filtered_targets, timestamp, t)
+        Vis_cur, Fus_tra = targets_to_deepsorvf_frames(filtered_targets, AIS_vis, timestamp)
+        if len(Vis_cur) > 0:
+            Vis_tra = pd.concat([Vis_tra, Vis_cur], ignore_index=True)
+            Vis_tra = Vis_tra.drop(Vis_tra[Vis_tra['timestamp'] < (timestamp // 1000 - 2 * 60)].index)
+        result = DRA.draw_traj(im, AIS_vis, AIS_cur, Vis_tra, Vis_cur, Fus_tra, timestamp)
+        result = imutils.resize(result, height=args.show_size)
         if writer is None:
             fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
             writer = cv2.VideoWriter(result_video[:-4] + '_' + args.mode + result_video[-4:],
@@ -315,6 +341,7 @@ def make_parser():
     parser.add_argument('--mode', default='full', choices=['botsort', 'virtual', 'assoc', 'full'])
     parser.add_argument('--max_frames', type=int, default=-1)
     parser.add_argument('--log_interval', type=int, default=30)
+    parser.add_argument('--show_size', type=int, default=500)
 
     parser.add_argument('-f', '--exp_file', default=None, type=str)
     parser.add_argument('-c', '--ckpt', default=None, type=str)
