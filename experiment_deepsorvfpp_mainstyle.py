@@ -80,6 +80,8 @@ def build_predictor(args):
 
 
 def timestamp_to_ms(value):
+    if value is None or pd.isna(value):
+        return None
     value = float(value)
     if value > 10000000000:
         return value
@@ -95,6 +97,8 @@ def ais_vis_to_records(AIS_vis, frame_timestamp_ms, max_age_sec):
         if 'x' not in row or 'y' not in row or pd.isna(row['x']) or pd.isna(row['y']):
             continue
         ais_timestamp_ms = timestamp_to_ms(row['timestamp'])
+        if ais_timestamp_ms is None:
+            continue
         delta_t = abs(frame_timestamp_ms - ais_timestamp_ms) / 1000.0
         if delta_t > max_age_sec:
             continue
@@ -111,6 +115,66 @@ def ais_vis_to_records(AIS_vis, frame_timestamp_ms, max_age_sec):
             'reliability': 1.0,
         })
     return records
+
+
+def get_value(source, name, default=None):
+    if source is None:
+        return default
+    if isinstance(source, pd.Series):
+        value = source.get(name, default)
+    else:
+        value = getattr(source, name, default)
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except TypeError:
+        pass
+    return value
+
+
+def latest_ais_by_mmsi(AIS_vis):
+    ais_latest = {}
+    if AIS_vis is None or len(AIS_vis) == 0 or 'mmsi' not in AIS_vis:
+        return ais_latest
+    for mmsi in AIS_vis['mmsi'].unique():
+        try:
+            mmsi_int = int(mmsi)
+        except (TypeError, ValueError):
+            continue
+        rows = AIS_vis[AIS_vis['mmsi'] == mmsi].reset_index(drop=True)
+        if len(rows) > 0:
+            ais_latest[mmsi_int] = rows.iloc[-1]
+    return ais_latest
+
+
+def target_ais_info(target, ais_latest):
+    ais_id = getattr(target, 'ais_id', None)
+    if ais_id is None:
+        return None
+    try:
+        ais_id_int = int(ais_id)
+    except (TypeError, ValueError):
+        return None
+
+    obs = getattr(target, 'last_ais_obs', None)
+    fallback = ais_latest.get(ais_id_int)
+    info = {
+        'mmsi': ais_id_int,
+        'lon': get_value(obs, 'lon', get_value(fallback, 'lon')),
+        'lat': get_value(obs, 'lat', get_value(fallback, 'lat')),
+        'speed': get_value(obs, 'speed', get_value(fallback, 'speed')),
+        'course': get_value(obs, 'course', get_value(fallback, 'course')),
+        'heading': get_value(obs, 'heading', get_value(fallback, 'heading')),
+        'type': get_value(fallback, 'type', -1),
+        'timestamp': get_value(obs, 'timestamp', get_value(fallback, 'timestamp', 0)),
+    }
+
+    required = ['lon', 'lat', 'speed', 'course']
+    if any(info[name] is None for name in required):
+        return None
+    return info
 
 
 def empty_ais_dataframe():
@@ -176,12 +240,7 @@ def write_track_results(result_metric, frame_id, online_targets):
 def targets_to_deepsorvf_frames(online_targets, AIS_vis, timestamp):
     vis_rows = []
     fus_rows = []
-    ais_latest = {}
-    if AIS_vis is not None and len(AIS_vis) > 0:
-        for mmsi in AIS_vis['mmsi'].unique():
-            rows = AIS_vis[AIS_vis['mmsi'] == mmsi].reset_index(drop=True)
-            if len(rows) > 0:
-                ais_latest[int(mmsi)] = rows.iloc[-1]
+    ais_latest = latest_ais_by_mmsi(AIS_vis)
 
     for target in online_targets:
         tlwh = target.tlwh
@@ -198,19 +257,12 @@ def targets_to_deepsorvf_frames(online_targets, AIS_vis, timestamp):
             'x': cx, 'y': cy, 'timestamp': ts_sec
         })
 
-        ais_id = getattr(target, 'ais_id', None)
-        if ais_id is None:
+        ais = target_ais_info(target, ais_latest)
+        if ais is None:
             continue
-        try:
-            ais_id_int = int(ais_id)
-        except (TypeError, ValueError):
-            continue
-        if ais_id_int not in ais_latest:
-            continue
-        ais = ais_latest[ais_id_int]
         fus_rows.append({
             'ID': track_id,
-            'mmsi': ais_id_int,
+            'mmsi': ais['mmsi'],
             'lon': ais['lon'],
             'lat': ais['lat'],
             'speed': ais['speed'],
@@ -221,7 +273,7 @@ def targets_to_deepsorvf_frames(online_targets, AIS_vis, timestamp):
             'y1': y1,
             'w': int(tlwh[2]),
             'h': int(tlwh[3]),
-            'timestamp': int(ais['timestamp'])
+            'timestamp': int(timestamp_to_ms(ais['timestamp']) or timestamp)
         })
 
     Vis_cur = pd.DataFrame(vis_rows, columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'timestamp'])
@@ -269,7 +321,17 @@ def draw_deepsorvf_style_each_frame(drawer, pic, Vis_tra, Vis_cur, Fus_tra):
     drawer.df_draw = filter_inf(
         df_draw, drawer.w, drawer.h, drawer.w0, drawer.h0,
         drawer.wn, drawer.hn, drawer.tf)
-    return draw_info_panel(add_img, drawer.df_draw, drawer.tf)
+    add_img = draw_info_panel(add_img, drawer.df_draw, drawer.tf)
+    if Vis_cur is not None and len(Vis_cur) > 0:
+        for _, row in Vis_cur.iterrows():
+            x1 = int(max(row['x1'], 0))
+            y1 = int(max(row['y1'], drawer.tf * 6))
+            cv2.putText(add_img, 'ID:{}'.format(int(row['ID'])),
+                        (x1, y1 - drawer.tf * 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, drawer.tf / 5,
+                        (255, 255, 255), max(drawer.tf // 2, 1),
+                        cv2.LINE_AA)
+    return add_img
 
 
 def run(args):
@@ -357,6 +419,10 @@ def run(args):
             writer = cv2.VideoWriter(result_video[:-4] + '_' + args.mode + result_video[-4:],
                                      fourcc, fps, (result.shape[1], result.shape[0]))
         writer.write(result)
+        if args.show:
+            cv2.imshow('DeepSORVF++', result)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
         elapsed = time.time() - start
         total_time.append(elapsed)
@@ -370,6 +436,8 @@ def run(args):
     cap.release()
     if writer is not None:
         writer.release()
+    if args.show:
+        cv2.destroyAllWindows()
     print('Saved metric prefix:', result_metric)
     print('Saved video:', result_video[:-4] + '_' + args.mode + result_video[-4:])
 
@@ -382,6 +450,7 @@ def make_parser():
     parser.add_argument('--max_frames', type=int, default=-1)
     parser.add_argument('--log_interval', type=int, default=30)
     parser.add_argument('--show_size', type=int, default=500)
+    parser.add_argument('--show', action='store_true')
 
     parser.add_argument('-f', '--exp_file', default=None, type=str)
     parser.add_argument('-c', '--ckpt', default=None, type=str)
