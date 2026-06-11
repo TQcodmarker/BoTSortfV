@@ -1,6 +1,9 @@
 import numpy as np
 import pandas as pd
+import cv2
+from PIL import Image
 from warnings import simplefilter
+from detection_yolox.yolo import YOLO
 
 try:
     from IPython import embed
@@ -10,6 +13,7 @@ except ImportError:
 
 
 simplefilter(action='ignore', category=FutureWarning)
+yolo = YOLO()
 
 
 def _df_append(df, row, ignore_index=False):
@@ -172,8 +176,7 @@ def id_whether_stable(id, last_5_trajs):
 
 
 class VISPRO_BoTSORT(object):
-    def __init__(self, predictor, tracker, anti, val, t):
-        self.predictor = predictor
+    def __init__(self, tracker, anti, val, t):
         self.tracker = tracker
         self.anti = anti
         self.last5_vis_tra_list = []
@@ -189,27 +192,9 @@ class VISPRO_BoTSORT(object):
         self.Anti_occlusion_traj = pd.DataFrame(columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'speed', 'timestamp'])
 
     def detection(self, image):
-        outputs, img_info = self.predictor.inference(image)
-        if outputs[0] is None:
-            return []
-
-        ratio = img_info.get('ratio')
-        if ratio is None:
-            ratio = min(
-                self.predictor.test_size[0] / float(img_info['height']),
-                self.predictor.test_size[1] / float(img_info['width']))
-
-        detections = outputs[0].detach().cpu().numpy()
-        detections[:, :4] /= ratio
-
-        bboxes = []
-        for det in detections:
-            x1, y1, x2, y2 = det[:4]
-            obj_conf = det[4]
-            cls_conf = det[5] if det.shape[0] > 5 else 1.0
-            conf = float(obj_conf * cls_conf)
-            bboxes.append((float(x1), float(y1), float(x2), float(y2), 'vessel', conf))
-        return bboxes
+        im0 = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        im0 = Image.fromarray(im0)
+        return yolo.detect_image(im0)
 
     @staticmethod
     def _boxes_to_botsort_detections(bboxes, force_conf=None):
@@ -414,6 +399,7 @@ class VISPRO_BoTSORT(object):
                     self.Anti_occlusion_traj = _df_append(self.Anti_occlusion_traj, self.VIS_tra_last.iloc[id_list.index(i)], ignore_index=True)
         self.Vis_tra = _clean_vis_dataframe(self.Vis_tra, include_speed=True)
         self.Vis_tra_cur = _clean_vis_dataframe(self.Vis_tra_cur, include_speed=True)
+        print('det:', len(bboxes), 'anti:', len(bboxes_anti_occ), 'vis_cur:', len(self.Vis_tra_cur))
         return self.Vis_tra, self.Vis_tra_cur
 
 
