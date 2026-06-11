@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import torch
 from warnings import simplefilter
 
 try:
@@ -15,6 +14,36 @@ simplefilter(action='ignore', category=FutureWarning)
 
 def _df_append(df, row, ignore_index=False):
     return pd.concat([df, pd.DataFrame([row])], ignore_index=ignore_index)
+
+
+def _clean_vis_dataframe(df, include_speed=False):
+    columns = ['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y']
+    if include_speed:
+        columns.append('speed')
+    columns.append('timestamp')
+
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=columns)
+
+    df = df.reindex(columns=columns).copy()
+    numeric_columns = [col for col in columns if col != 'speed']
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna(subset=numeric_columns)
+    if len(df) == 0:
+        return pd.DataFrame(columns=columns)
+
+    finite_mask = np.isfinite(df[numeric_columns].to_numpy(dtype=float)).all(axis=1)
+    df = df[finite_mask]
+    df = df[(df['x2'] > df['x1']) & (df['y2'] > df['y1'])]
+    if len(df) == 0:
+        return pd.DataFrame(columns=columns)
+
+    for col in numeric_columns:
+        df[col] = df[col].astype(int)
+    if include_speed:
+        df['speed'] = df['speed'].fillna('[0, 0]')
+    return df.reset_index(drop=True)
 
 
 def box_whether_in_area(bounding_box, Area):
@@ -149,8 +178,8 @@ class VISPRO_BoTSORT(object):
         self.anti = anti
         self.last5_vis_tra_list = []
         self.Vis_tra_cur_3 = pd.DataFrame(columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'timestamp'])
-        self.Vis_tra_cur = pd.DataFrame(columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'timestamp'])
-        self.Vis_tra = pd.DataFrame(columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'timestamp'])
+        self.Vis_tra_cur = pd.DataFrame(columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'speed', 'timestamp'])
+        self.Vis_tra = pd.DataFrame(columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'speed', 'timestamp'])
         self.VIS_tra_last = pd.DataFrame(columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'speed', 'timestamp'])
         self.OAR_list = []
         self.OAR_ids_list = []
@@ -256,9 +285,13 @@ class VISPRO_BoTSORT(object):
             df['timestamp'] = timestamp // 1000
             self.Vis_tra_cur = _df_append(self.Vis_tra_cur, df, ignore_index=True)
         self.Vis_tra_cur_3 = pd.DataFrame(columns=['ID', 'x1', 'y1', 'x2', 'y2', 'x', 'y', 'timestamp'])
+        self.Vis_tra_cur = _clean_vis_dataframe(self.Vis_tra_cur, include_speed=False)
 
         Vis_tra_cur_withfeature = motion_features_extraction(self.last5_vis_tra_list, VIS_tra_cur=self.Vis_tra_cur)
+        Vis_tra_cur_withfeature = _clean_vis_dataframe(Vis_tra_cur_withfeature, include_speed=True)
+        self.Vis_tra_cur = Vis_tra_cur_withfeature
         self.Vis_tra = pd.concat([self.Vis_tra, Vis_tra_cur_withfeature], ignore_index=True)
+        self.Vis_tra = _clean_vis_dataframe(self.Vis_tra, include_speed=True)
         if len(self.last5_vis_tra_list) > 4:
             self.last5_vis_tra_list.pop(0)
         self.last5_vis_tra_list.append(Vis_tra_cur_withfeature)
@@ -379,6 +412,8 @@ class VISPRO_BoTSORT(object):
                 id_list = list(self.VIS_tra_last['ID'].unique())
                 for i in self.OAR_ids_list:
                     self.Anti_occlusion_traj = _df_append(self.Anti_occlusion_traj, self.VIS_tra_last.iloc[id_list.index(i)], ignore_index=True)
+        self.Vis_tra = _clean_vis_dataframe(self.Vis_tra, include_speed=True)
+        self.Vis_tra_cur = _clean_vis_dataframe(self.Vis_tra_cur, include_speed=True)
         return self.Vis_tra, self.Vis_tra_cur
 
 
