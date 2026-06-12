@@ -33,6 +33,7 @@ def _build_botsort_args():
         track_low_thresh=0.1,
         new_track_thresh=0.6,
         track_buffer=30,
+        match_thresh=0.8,
         proximity_thresh=0.5,
         appearance_thresh=0.25,
         with_reid=False,
