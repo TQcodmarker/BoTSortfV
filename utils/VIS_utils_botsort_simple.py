@@ -40,7 +40,7 @@ def _build_botsort_args():
         fast_reid_config='',
         fast_reid_weights='',
         device='cuda',
-        cmc_method='sparseOptFlow',
+        cmc_method='none',
         name='vessel',
         ablation=False,
         mot20=False,
@@ -225,46 +225,8 @@ class VISPRO(object):
         return bboxes
 
     def track(self, image, bboxes, bboxes_anti_occ, id_list, timestamp):
-        """
-        bboxes: 检测结果（不含遮挡区域）
-        bboxes_anti_occ: 遮挡区域抗遮挡推算
-        id_list: 抗遮挡推算对应ID
-        """
-        # 用于目标跟踪
         detections = []
-        if len(bboxes) or len(bboxes_anti_occ):
-            # 检测结果整理
-            for x1, y1, x2, y2, _, conf in bboxes:
-                #获取框信息 [中心点x坐标，中心点y坐标，宽度，高度]
-                obj = [int((x1+x2)/2), int((y1+y2)/2),x2-x1, y2-y1]
-                bbox_xywh.append(obj)#框信息
-                confs.append(conf)#置信度
-            # 抗遮挡预测结果整理
-            for x1, y1, x2, y2, _, conf in bboxes_anti_occ:
-                #获取框信息 [中心点x坐标，中心点y坐标，宽度，高度]
-                obj = [int((x1+x2)/2), int((y1+y2)/2),x2-x1, y2-y1]
-                bbox_xywh_anti_occ.append(obj)#框信息
-                confs_anti_occ.append(conf)#置信度
-
-            # 检测结果、抗遮挡预测结果转tensor
-            xywhs = torch.Tensor(bbox_xywh)
-            confss = torch.Tensor(confs)
-            xywhs_anti_occ = torch.Tensor(bbox_xywh_anti_occ)
-            confss_anti_occ = torch.Tensor(confs_anti_occ)
-            # 放入DeepSORT, 输出outputs = [x1,y1,x2,y2,[track],ID]
-            outputs = deepsort.update(xywhs, confss, image, xywhs_anti_occ, confss_anti_occ, id_list, timestamp)
-            for value in list(outputs):
-                x1, y1, x2, y2, _, track_id = value
-                if track_id in id_list:
-                    x1, y1, x2, y2, _, _ = bboxes_anti_occ[id_list.index(track_id)] # 要把没有历史纪录的id从id——list中删掉
-                # 存储至pd中[ID,x1,y1,x2,y2,trackx,tracky,time]
-                self.Vis_tra_cur_3 = self.Vis_tra_cur_3.append({'ID':track_id,\
-                    'x1':int(x1),'y1':int(y1),'x2':int(x2),'y2':int(y2),'x':int((x1 + x2) / 2),\
-                        'y':int((y1 + y2) / 2), 'timestamp':timestamp//1000}, ignore_index=True)
-
-    def track(self, image, bboxes, bboxes_anti_occ, id_list, timestamp):
-        detections = []
-        for x1, y1, x2, y2, _, conf in list(bboxes) + list(bboxes_anti_occ):
+        for x1, y1, x2, y2, _, conf in bboxes:
             if x2 <= x1 or y2 <= y1:
                 continue
             detections.append([
@@ -436,7 +398,7 @@ class VISPRO(object):
             bboxes = self.detection(image)
             # print(bboxes)
             # 1.2.抗遮挡
-            bboxes_anti_occ = self.anti_occ(self.last5_vis_tra_list, bboxes, AIS_vis, bind_inf, timestamp // 1000)
+            bboxes_anti_occ = []
 
             # 1.3.BoT-SORT跟踪
             # print(bboxes_anti_occ)
