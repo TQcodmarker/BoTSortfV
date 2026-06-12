@@ -234,6 +234,15 @@ class VISPRO(object):
                 float(conf), 1.0, 0.0
             ])
 
+        # 前端注入：将抗遮挡预测框作为高置信度虚拟检测框送入BoT-SORT，用于维持原ID存活
+        for x1, y1, x2, y2, _, conf in bboxes_anti_occ:
+            if x2 <= x1 or y2 <= y1:
+                continue
+            detections.append([
+                float(x1), float(y1), float(x2), float(y2),
+                float(conf), 1.0, 0.0
+            ])
+
         if len(detections):
             output_results = np.asarray(detections, dtype=float)
         else:
@@ -247,6 +256,11 @@ class VISPRO(object):
             x2 = x1 + w
             y2 = y1 + h
             track_id = int(target.track_id)
+            if track_id in id_list:
+                idx = id_list.index(track_id)
+                # 后端覆盖：遮挡ID输出时使用抗遮挡预测框坐标，纠正KF漂移
+                if idx < len(bboxes_anti_occ):
+                    x1, y1, x2, y2, _, _ = bboxes_anti_occ[idx]
             self.Vis_tra_cur_3 = self.Vis_tra_cur_3.append({'ID':track_id,\
                 'x1':int(x1),'y1':int(y1),'x2':int(x2),'y2':int(y2),'x':int((x1 + x2) / 2),\
                     'y':int((y1 + y2) / 2), 'timestamp':timestamp//1000}, ignore_index=True)
@@ -398,7 +412,7 @@ class VISPRO(object):
             bboxes = self.detection(image)
             # print(bboxes)
             # 1.2.抗遮挡
-            bboxes_anti_occ = []
+            bboxes_anti_occ = self.anti_occ(self.last5_vis_tra_list, bboxes, AIS_vis, bind_inf, timestamp // 1000)
 
             # 1.3.BoT-SORT跟踪
             # print(bboxes_anti_occ)
