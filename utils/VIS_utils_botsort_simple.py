@@ -224,7 +224,7 @@ class VISPRO(object):
         bboxes = yolo.detect_image(im0)
         return bboxes
 
-    def track(self, image, bboxes, bboxes_anti_occ, id_list, timestamp):
+    def track(self, image, bboxes, bboxes_anti_occ, id_list, timestamp, bboxes_rescue=None):
         detections = []
         for x1, y1, x2, y2, _, conf in bboxes:
             if x2 <= x1 or y2 <= y1:
@@ -237,6 +237,7 @@ class VISPRO(object):
         rescue_overlap_thresh = 0.3
         valid_anti_boxes = []
         valid_anti_ids = []
+        rescue_boxes = bboxes if bboxes_rescue is None else bboxes_rescue
         for index, anti_box in enumerate(bboxes_anti_occ):
             if index >= len(id_list):
                 break
@@ -246,17 +247,17 @@ class VISPRO(object):
                 continue
 
             rescued = False
-            for bx1, by1, bx2, by2, _, _ in bboxes:
+            for bx1, by1, bx2, by2, _, _ in rescue_boxes:
                 ix1 = max(float(ax1), float(bx1))
                 iy1 = max(float(ay1), float(by1))
                 ix2 = min(float(ax2), float(bx2))
                 iy2 = min(float(ay2), float(by2))
                 inter_area = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-                if inter_area / anti_area > rescue_overlap_thresh:
+                if anti_area > 0 and inter_area / anti_area > rescue_overlap_thresh:
                     rescued = True
                     break
 
-            # 真实框优先救援：YOLO已重新捕捉到目标时，不再注入虚拟框，也不再覆盖输出坐标
+            # 真实框优先救援：使用未被anti_occ删除的YOLO原始框判断目标是否已脱离遮挡
             if rescued:
                 continue
             valid_anti_boxes.append(anti_box)
@@ -268,7 +269,7 @@ class VISPRO(object):
                 continue
             detections.append([
                 float(x1), float(y1), float(x2), float(y2),
-                float(conf), 1.0, 0.0
+                float(0.4), 1.0, 0.0
             ])
 
         if len(detections):
@@ -438,6 +439,7 @@ class VISPRO(object):
             
             # 1.1.目标检测框生成
             bboxes = self.detection(image)
+            bboxes_original = [bbox[:] for bbox in bboxes]
             # print(bboxes)
             # 1.2.抗遮挡
             bboxes_anti_occ = self.anti_occ(self.last5_vis_tra_list, bboxes, AIS_vis, bind_inf, timestamp // 1000)
@@ -445,7 +447,7 @@ class VISPRO(object):
             # 1.3.BoT-SORT跟踪
             # print(bboxes_anti_occ)
             self.track(image, bboxes, bboxes_anti_occ=bboxes_anti_occ,\
-                    id_list=self.OAR_ids_list, timestamp=timestamp // 1000)
+                    id_list=self.OAR_ids_list, timestamp=timestamp // 1000, bboxes_rescue=bboxes_original)
 
             # 轨迹数据更新
             Vis_tra_cur = self.Vis_tra_cur
