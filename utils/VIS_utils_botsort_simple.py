@@ -234,8 +234,36 @@ class VISPRO(object):
                 float(conf), 1.0, 0.0
             ])
 
-        # 前端注入：将抗遮挡预测框作为高置信度虚拟检测框送入BoT-SORT，用于维持原ID存活
-        for x1, y1, x2, y2, _, conf in bboxes_anti_occ:
+        rescue_overlap_thresh = 0.3
+        valid_anti_boxes = []
+        valid_anti_ids = []
+        for index, anti_box in enumerate(bboxes_anti_occ):
+            if index >= len(id_list):
+                break
+            ax1, ay1, ax2, ay2, _, _ = anti_box
+            anti_area = max(0.0, float(ax2 - ax1)) * max(0.0, float(ay2 - ay1))
+            if anti_area <= 0:
+                continue
+
+            rescued = False
+            for bx1, by1, bx2, by2, _, _ in bboxes:
+                ix1 = max(float(ax1), float(bx1))
+                iy1 = max(float(ay1), float(by1))
+                ix2 = min(float(ax2), float(bx2))
+                iy2 = min(float(ay2), float(by2))
+                inter_area = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+                if inter_area / anti_area > rescue_overlap_thresh:
+                    rescued = True
+                    break
+
+            # 真实框优先救援：YOLO已重新捕捉到目标时，不再注入虚拟框，也不再覆盖输出坐标
+            if rescued:
+                continue
+            valid_anti_boxes.append(anti_box)
+            valid_anti_ids.append(id_list[index])
+
+        # 前端注入：仅将仍处于遮挡危险期的预测框送入BoT-SORT，用于维持原ID存活
+        for x1, y1, x2, y2, _, conf in valid_anti_boxes:
             if x2 <= x1 or y2 <= y1:
                 continue
             detections.append([
@@ -256,11 +284,11 @@ class VISPRO(object):
             x2 = x1 + w
             y2 = y1 + h
             track_id = int(target.track_id)
-            if track_id in id_list:
-                idx = id_list.index(track_id)
-                # 后端覆盖：遮挡ID输出时使用抗遮挡预测框坐标，纠正KF漂移
-                if idx < len(bboxes_anti_occ):
-                    x1, y1, x2, y2, _, _ = bboxes_anti_occ[idx]
+            if track_id in valid_anti_ids:
+                idx = valid_anti_ids.index(track_id)
+                # 后端覆盖：仅对未被YOLO救回的遮挡ID使用预测框坐标，避免分离瞬间滞后
+                if idx < len(valid_anti_boxes):
+                    x1, y1, x2, y2, _, _ = valid_anti_boxes[idx]
             self.Vis_tra_cur_3 = self.Vis_tra_cur_3.append({'ID':track_id,\
                 'x1':int(x1),'y1':int(y1),'x2':int(x2),'y2':int(y2),'x':int((x1 + x2) / 2),\
                     'y':int((y1 + y2) / 2), 'timestamp':timestamp//1000}, ignore_index=True)
