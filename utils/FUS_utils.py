@@ -54,6 +54,67 @@ def DTW_fast(traj0, traj1):
     return d*math.exp(theta)
 
 
+def _velocity(traj, window=5):
+    traj = np.asarray(traj, dtype=float)
+    if len(traj) < 2:
+        return np.zeros(2, dtype=float)
+    start = max(0, len(traj) - window)
+    dt = max(len(traj) - start - 1, 1)
+    return (traj[-1] - traj[start]) / dt
+
+
+def _recent_distance(traj0, traj1, window=5):
+    traj0 = np.asarray(traj0, dtype=float)
+    traj1 = np.asarray(traj1, dtype=float)
+    num = min(len(traj0), len(traj1), window)
+    if num <= 0:
+        return 0.0
+    return float(np.mean(np.linalg.norm(traj0[-num:] - traj1[-num:], axis=1)))
+
+
+def DTW_dynamic(traj0, traj1, max_dis):
+    if len(traj0) == 0 or len(traj1) == 0:
+        return 1000000000
+
+    traj0_raw = np.asarray(traj0, dtype=float)
+    traj1_raw = np.asarray(traj1, dtype=float)
+    theta = angle(traj0_raw, traj1_raw) if len(traj0_raw) > 1 and len(traj1_raw) > 1 else 0
+
+    if len(traj0_raw) > 2 and len(traj1_raw) > 2:
+        traj0_dtw = __reduce_by_half(traj0_raw)
+        traj1_dtw = __reduce_by_half(traj1_raw)
+    else:
+        traj0_dtw = traj0_raw
+        traj1_dtw = traj1_raw
+
+    dtw_dist, path = fastdtw(traj0_dtw, traj1_dtw, dist=euclidean)
+    dtw_cost = dtw_dist / max(len(path), 1)
+
+    end_cost = float(np.linalg.norm(traj0_raw[-1] - traj1_raw[-1]))
+    recent_cost = _recent_distance(traj0_raw, traj1_raw)
+    speed_cost = float(np.linalg.norm(_velocity(traj0_raw) - _velocity(traj1_raw)))
+    direction_cost = (theta / math.pi) * max(max_dis, 1.0)
+
+    len_conf = min(len(traj0_raw), len(traj1_raw)) / 10.0
+    len_conf = float(np.clip(len_conf, 0.0, 1.0))
+    end_ratio = float(np.clip(end_cost / max(max_dis, 1.0), 0.0, 1.0))
+
+    dtw_w = 0.35 + 0.35 * len_conf
+    end_w = 0.35 - 0.15 * len_conf + 0.20 * end_ratio
+    recent_w = 0.20
+    speed_w = 0.10 + 0.10 * len_conf
+    direction_w = 0.10 + 0.20 * (theta / math.pi)
+    weight_sum = dtw_w + end_w + recent_w + speed_w + direction_w
+
+    return (
+        dtw_w * dtw_cost +
+        end_w * end_cost +
+        recent_w * recent_cost +
+        speed_w * speed_cost +
+        direction_w * direction_cost
+    ) / weight_sum
+
+
 def traj_group(df_data, df_dataCur,  kind):
     """
     对数据轨迹按照MMSI呼号或者ID号进行分组，并获取每条船舶或者每个检测框的轨迹
@@ -159,7 +220,7 @@ class FUSPRO(object):
                     dis   = ((x_VIS-x_AIS)**2+(y_VIS-y_AIS)**2)**0.5
                     # 判断是否保存
                     if dis < self.max_dis and theta < math.pi*(5/6):
-                        matrix_S[i][j] = DTW_fast(VIS_list[i], AIS_list[j])
+                        matrix_S[i][j] = DTW_dynamic(VIS_list[i], AIS_list[j], self.max_dis)
                     else:
                         matrix_S[i][j] = 1000000000
                 

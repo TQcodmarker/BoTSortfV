@@ -56,6 +56,19 @@ def _build_botsort_args():
         ais_enable_virtual_update=False,
         ais_debug_enabled=True,
         ais_debug_path=os.path.join(ROOT, 'result', 'ais_motion_prior_debug.csv'),
+        tgor_debug_enabled=True,
+        tgor_node_debug_path=os.path.join(ROOT, 'result', 'os_tgor_nodes.csv'),
+        tgor_edge_debug_path=os.path.join(ROOT, 'result', 'os_tgor_edges.csv'),
+        tgor_edge_debug_min_risk=0.05,
+        tgor_future_steps=5,
+        tgor_neighbor_radius=250.0,
+        tgor_ema=0.70,
+        tgor_sigma_d=120.0,
+        tgor_sigma_v=35.0,
+        tgor_sigma_f=80.0,
+        tgor_occlusion_mark_thresh=0.35,
+        tgor_output_occlusion_thresh=0.35,
+        tgor_lifecycle_extend=1.0,
     )
 
 # 初始化跟踪模型
@@ -328,10 +341,13 @@ def _latest_bound_ais_records(AIS_vis, bind_inf, timestamp, ais_projector=None):
 
 
 class VISPRO(object):
-    def __init__(self, anti, val, t, camera_para=None, im_shape=None):
+    def __init__(self, anti, val, t, camera_para=None, im_shape=None,
+                 tracker=None, tracker_args=None):
         self.anti = anti
         frame_rate = max(1.0, 1000.0 / float(t))
-        self.tracker = BoTSORT(_build_botsort_args(), frame_rate=frame_rate)
+        self.tracker = tracker if tracker is not None else BoTSORT(
+            tracker_args if tracker_args is not None else _build_botsort_args(),
+            frame_rate=frame_rate)
         self.ais_projector = AISProjector(camera_para, im_shape) \
             if camera_para is not None and im_shape is not None else None
         self.last5_vis_tra_list = []
