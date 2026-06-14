@@ -59,6 +59,7 @@ def _build_botsort_args():
         tgor_debug_enabled=True,
         tgor_node_debug_path=os.path.join(ROOT, 'result', 'os_tgor_nodes.csv'),
         tgor_edge_debug_path=os.path.join(ROOT, 'result', 'os_tgor_edges.csv'),
+        tgor_output_debug_path=os.path.join(ROOT, 'result', 'os_tgor_output.csv'),
         tgor_edge_debug_min_risk=0.05,
         tgor_future_steps=5,
         tgor_neighbor_radius=250.0,
@@ -67,7 +68,10 @@ def _build_botsort_args():
         tgor_sigma_v=35.0,
         tgor_sigma_f=80.0,
         tgor_occlusion_mark_thresh=0.35,
+        tgor_mark_min_ais_reliability=0.35,
         tgor_output_occlusion_thresh=0.35,
+        tgor_output_high_state_thresh=0.75,
+        tgor_output_min_ais_reliability=0.35,
         tgor_lifecycle_extend=1.0,
     )
 
@@ -361,6 +365,46 @@ class VISPRO(object):
         self.val = val
         self.t = t
         self.Anti_occlusion_traj = pd.DataFrame(columns=['ID','x1','y1','x2','y2','x','y','speed','timestamp'])
+        self.vis_debug_path = getattr(
+            self.tracker.args, 'vis_online_debug_path',
+            os.path.join(ROOT, 'result', 'vis_online_targets.csv'))
+        self._vis_debug_header_written = False
+
+    def _write_vis_online_debug(self, timestamp, target, accepted, reason, tlwh=None):
+        if self.vis_debug_path is None:
+            return
+        debug_dir = os.path.dirname(self.vis_debug_path)
+        if debug_dir:
+            os.makedirs(debug_dir, exist_ok=True)
+        fieldnames = [
+            'tracker_frame_id', 'timestamp', 'track_id', 'track_state',
+            'is_activated', 'accepted', 'reason', 'x', 'y', 'w', 'h',
+            'occlusion_state', 'track_reliability',
+        ]
+        mode = 'w' if not self._vis_debug_header_written else 'a'
+        with open(self.vis_debug_path, mode, newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not self._vis_debug_header_written:
+                writer.writeheader()
+            x = y = w = h = None
+            if tlwh is not None:
+                x, y, w, h = [float(v) for v in tlwh]
+            writer.writerow({
+                'tracker_frame_id': getattr(self.tracker, 'frame_id', None),
+                'timestamp': timestamp,
+                'track_id': getattr(target, 'track_id', None),
+                'track_state': getattr(target, 'state', None),
+                'is_activated': getattr(target, 'is_activated', None),
+                'accepted': int(bool(accepted)),
+                'reason': reason,
+                'x': x,
+                'y': y,
+                'w': w,
+                'h': h,
+                'occlusion_state': getattr(target, 'occlusion_state', None),
+                'track_reliability': getattr(target, 'track_reliability', None),
+            })
+        self._vis_debug_header_written = True
 
     def detection(self, image):
         # 用于目标检测
@@ -405,6 +449,8 @@ class VISPRO(object):
         for target in list(online_targets):
             x1, y1, w, h = np.asarray(target.tlwh, dtype=float)
             if w <= 0 or h <= 0:
+                self._write_vis_online_debug(
+                    timestamp, target, False, 'invalid_bbox', [x1, y1, w, h])
                 continue
             x2 = x1 + w
             y2 = y1 + h
@@ -412,6 +458,8 @@ class VISPRO(object):
             self.Vis_tra_cur_3 = self.Vis_tra_cur_3.append({'ID':track_id,\
                 'x1':int(x1),'y1':int(y1),'x2':int(x2),'y2':int(y2),'x':int((x1 + x2) / 2),\
                     'y':int((y1 + y2) / 2), 'timestamp':timestamp//1000}, ignore_index=True)
+            self._write_vis_online_debug(
+                timestamp, target, True, 'appended', [x1, y1, w, h])
 
     def update_tra(self, Vis_tra, timestamp):
         # 用于轨迹更新
