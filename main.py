@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from utils.file_read import read_all, ais_initial, update_time, time2stamp
 
-from utils.VIS_utils import VISPRO
+from utils.VIS_utils_botsort_simple import VISPRO
 from utils.AIS_utils import AISPRO
 from utils.FUS_utils import FUSPRO
 from utils.gen_result import gen_result
@@ -37,7 +37,7 @@ def main(arg):
     t = int(1000/fps)
     
     AIS = AISPRO(arg.ais_path, ais_file, im_shape, t) # ais path, ais file, im_shape, t
-    VIS = VISPRO(arg.anti, arg.anti_rate, t) # anti-occlusion, occlusion rate, t
+    VIS = VISPRO(arg.anti, arg.anti_rate, t, camera_para, im_shape) # anti-occlusion, occlusion rate, t
     FUS = FUSPRO(max_dis, im_shape, t) # max distance of matching, im_shape, t
     DRA = DRAW(im_shape, t) # im_shape, t
     

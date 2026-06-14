@@ -20,7 +20,7 @@ if BOT_SORT_ROOT not in sys.path:
     sys.path.insert(0, BOT_SORT_ROOT)
 
 from tracker.bot_sort import BoTSORT
-from tracker.ais_fusion import AISFrame
+from tracker.ais_fusion import AISFrame, AISProjector
 
 simplefilter(action='ignore', category=FutureWarning)
 # 初始化目标检测
@@ -206,7 +206,31 @@ def id_whether_stable(id, last_5_trajs):
     return True
 
 # 鐩爣妫€娴嬭窡韪?
-def _latest_bound_ais_records(AIS_vis, bind_inf, timestamp):
+def _velocity_consistency(v_diff, v_sogcog):
+    if v_diff is None or v_sogcog is None:
+        return 0.0
+    diff_norm = np.linalg.norm(v_diff)
+    sogcog_norm = np.linalg.norm(v_sogcog)
+    if diff_norm < 1e-6 or sogcog_norm < 1e-6:
+        return 0.0
+    cos = np.dot(v_diff, v_sogcog) / (diff_norm * sogcog_norm)
+    return float(np.clip((cos + 1.0) / 2.0, 0.0, 1.0))
+
+
+def _blend_ais_velocity(v_diff, v_sogcog):
+    if v_diff is None:
+        return v_sogcog, 0.7 if v_sogcog is not None else 0.0
+    if v_sogcog is None:
+        return v_diff, 0.7
+
+    consistency = _velocity_consistency(v_diff, v_sogcog)
+    if consistency < 0.35:
+        return v_diff, 0.5
+    alpha = 0.5 + 0.3 * consistency
+    return alpha * v_diff + (1.0 - alpha) * v_sogcog, 0.8 + 0.2 * consistency
+
+
+def _latest_bound_ais_records(AIS_vis, bind_inf, timestamp, ais_projector=None):
     records = []
     if len(AIS_vis) == 0 or len(bind_inf) == 0:
         return records
@@ -236,10 +260,12 @@ def _latest_bound_ais_records(AIS_vis, bind_inf, timestamp):
         prev = traj.iloc[-2] if len(traj) > 1 else None
 
         vx = vy = None
+        v_diff = None
         if prev is not None:
             dt = max(float(now['timestamp']) - float(prev['timestamp']), 1e-6)
             vx = (float(now['x']) - float(prev['x'])) / dt
             vy = (float(now['y']) - float(prev['y'])) / dt
+            v_diff = np.asarray([vx, vy], dtype=float)
 
         if 'speed' in traj.columns and len(traj) > 1:
             speed_variance = float(traj['speed'].tail(5).var())
@@ -258,11 +284,22 @@ def _latest_bound_ais_records(AIS_vis, bind_inf, timestamp):
         sog = None if 'speed' not in now or pd.isna(now['speed']) else float(now['speed'])
         cog = None if 'course' not in now or pd.isna(now['course']) else float(now['course'])
         vx_ground = vy_ground = None
+        v_sogcog = None
         if sog is not None and cog is not None:
             speed_mps = sog * 1852.0 / 3600.0
             cog_rad = np.deg2rad(cog)
             vx_ground = speed_mps * np.sin(cog_rad)
             vy_ground = speed_mps * np.cos(cog_rad)
+            if ais_projector is not None and 'lon' in now and 'lat' in now and \
+                    not pd.isna(now['lon']) and not pd.isna(now['lat']):
+                vx_sog, vy_sog = ais_projector.velocity_px(
+                    float(now['lon']), float(now['lat']), cog, sog)
+                if vx_sog is not None and vy_sog is not None:
+                    v_sogcog = np.asarray([vx_sog, vy_sog], dtype=float)
+
+        v_ais, velocity_reliability = _blend_ais_velocity(v_diff, v_sogcog)
+        if v_ais is not None:
+            vx, vy = float(v_ais[0]), float(v_ais[1])
 
         records.append({
             'ais_id': mmsi,
@@ -280,7 +317,7 @@ def _latest_bound_ais_records(AIS_vis, bind_inf, timestamp):
             'vy_ground': vy_ground,
             'speed_variance': speed_variance,
             'continuity': continuity,
-            'reliability': 1.0,
+            'reliability': velocity_reliability,
             'lon': None if 'lon' not in now or pd.isna(now['lon']) else float(now['lon']),
             'lat': None if 'lat' not in now or pd.isna(now['lat']) else float(now['lat']),
         })
@@ -289,10 +326,12 @@ def _latest_bound_ais_records(AIS_vis, bind_inf, timestamp):
 
 
 class VISPRO(object):
-    def __init__(self, anti, val, t):
+    def __init__(self, anti, val, t, camera_para=None, im_shape=None):
         self.anti = anti
         frame_rate = max(1.0, 1000.0 / float(t))
         self.tracker = BoTSORT(_build_botsort_args(), frame_rate=frame_rate)
+        self.ais_projector = AISProjector(camera_para, im_shape) \
+            if camera_para is not None and im_shape is not None else None
         self.last5_vis_tra_list = []
         self.Vis_tra_cur_3      = pd.DataFrame(columns=['ID','x1','y1','x2','y2','x','y','timestamp'])
         self.Vis_tra_cur        = pd.DataFrame(columns=['ID','x1','y1','x2','y2','x','y','timestamp'])
@@ -503,7 +542,8 @@ class VISPRO(object):
             # print(bboxes)
             # 1.2.抗遮挡
             bboxes_anti_occ = self.anti_occ(self.last5_vis_tra_list, bboxes, AIS_vis, bind_inf, timestamp // 1000)
-            ais_frame = _latest_bound_ais_records(AIS_vis, bind_inf, timestamp // 1000)
+            ais_frame = _latest_bound_ais_records(
+                AIS_vis, bind_inf, timestamp // 1000, self.ais_projector)
 
             # 1.3.BoT-SORT跟踪
             # print(bboxes_anti_occ)
