@@ -54,6 +54,8 @@ def _build_botsort_args():
         ais_motion_max_weight=1.0,
         ais_max_speed_variance=4.0,
         ais_enable_virtual_update=False,
+        ais_debug_enabled=True,
+        ais_debug_path=os.path.join(ROOT, 'result', 'ais_motion_prior_debug.csv'),
     )
 
 # 初始化跟踪模型
@@ -365,7 +367,7 @@ class VISPRO(object):
             if obs is not None:
                 track.bind_ais(obs.ais_id, obs=obs, frame_id=self.tracker.frame_id)
 
-    def track(self, image, bboxes, bboxes_anti_occ, id_list, timestamp, ais_frame=None):
+    def track(self, image, bboxes, timestamp, ais_frame=None):
         detections = []
         for x1, y1, x2, y2, _, conf in bboxes:
             if x2 <= x1 or y2 <= y1:
@@ -541,15 +543,20 @@ class VISPRO(object):
             bboxes = self.detection(image)
             # print(bboxes)
             # 1.2.抗遮挡
-            bboxes_anti_occ = self.anti_occ(self.last5_vis_tra_list, bboxes, AIS_vis, bind_inf, timestamp // 1000)
+            if self.anti:
+                bboxes_for_anti = list(bboxes)
+                bboxes_anti_occ = self.anti_occ(
+                    self.last5_vis_tra_list, bboxes_for_anti, AIS_vis,
+                    bind_inf, timestamp // 1000)
+            else:
+                bboxes_anti_occ = []
             ais_frame = _latest_bound_ais_records(
                 AIS_vis, bind_inf, timestamp // 1000, self.ais_projector)
 
             # 1.3.BoT-SORT跟踪
             # print(bboxes_anti_occ)
-            self.track(image, bboxes, bboxes_anti_occ=bboxes_anti_occ,\
-                    id_list=self.OAR_ids_list, timestamp=timestamp // 1000,
-                    ais_frame=ais_frame)
+            self.track(image, bboxes, timestamp=timestamp // 1000,
+                       ais_frame=ais_frame)
 
             # 轨迹数据更新
             Vis_tra_cur = self.Vis_tra_cur
