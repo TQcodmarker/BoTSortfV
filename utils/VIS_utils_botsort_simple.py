@@ -20,10 +20,13 @@ if BOT_SORT_ROOT not in sys.path:
     sys.path.insert(0, BOT_SORT_ROOT)
 
 from tracker.bot_sort import BoTSORT
+from tracker.ais_fusion import AISFrame
 
 simplefilter(action='ignore', category=FutureWarning)
 # 初始化目标检测
 yolo = YOLO()
+
+AIS_HISTORY_SECONDS = 30
 
 
 def _build_botsort_args():
@@ -48,6 +51,9 @@ def _build_botsort_args():
         camera_para=None,
         ais_cost_weight=0.0,
         ais_heading_weight=0.0,
+        ais_motion_max_weight=1.0,
+        ais_max_speed_variance=4.0,
+        ais_enable_virtual_update=False,
     )
 
 # 初始化跟踪模型
@@ -199,7 +205,89 @@ def id_whether_stable(id, last_5_trajs):
             return False
     return True
 
-# 目标检测跟踪
+# 鐩爣妫€娴嬭窡韪?
+def _latest_bound_ais_records(AIS_vis, bind_inf, timestamp):
+    records = []
+    if len(AIS_vis) == 0 or len(bind_inf) == 0:
+        return records
+
+    current_time = int(timestamp)
+    ais_data = AIS_vis.copy()
+    for column in ['mmsi', 'x', 'y', 'timestamp', 'speed', 'course']:
+        if column in ais_data.columns:
+            ais_data[column] = pd.to_numeric(ais_data[column], errors='coerce')
+    ais_data = ais_data.dropna(subset=['mmsi', 'x', 'y', 'timestamp'])
+    ais_data = ais_data[
+        (ais_data['timestamp'] <= current_time) &
+        (ais_data['timestamp'] >= current_time - AIS_HISTORY_SECONDS)
+    ]
+    if len(ais_data) == 0:
+        return records
+
+    for _, bind in bind_inf.iterrows():
+        mmsi = int(bind['mmsi'])
+        track_id = int(bind['ID'])
+        traj = ais_data[ais_data['mmsi'].astype(int) == mmsi]
+        if len(traj) == 0:
+            continue
+        traj = traj.sort_values('timestamp').drop_duplicates(
+            subset=['timestamp'], keep='last')
+        now = traj.iloc[-1]
+        prev = traj.iloc[-2] if len(traj) > 1 else None
+
+        vx = vy = None
+        if prev is not None:
+            dt = max(float(now['timestamp']) - float(prev['timestamp']), 1e-6)
+            vx = (float(now['x']) - float(prev['x'])) / dt
+            vy = (float(now['y']) - float(prev['y'])) / dt
+
+        if 'speed' in traj.columns and len(traj) > 1:
+            speed_variance = float(traj['speed'].tail(5).var())
+            if np.isnan(speed_variance):
+                speed_variance = 0.0
+        else:
+            speed_variance = 0.0
+
+        if len(traj) > 1:
+            gaps = np.diff(traj['timestamp'].tail(5).astype(float).values)
+            mean_gap = float(np.mean(gaps)) if len(gaps) else 1.0
+            continuity = float(np.clip(1.0 / max(mean_gap, 1.0), 0.0, 1.0))
+        else:
+            continuity = 0.5
+
+        sog = None if 'speed' not in now or pd.isna(now['speed']) else float(now['speed'])
+        cog = None if 'course' not in now or pd.isna(now['course']) else float(now['course'])
+        vx_ground = vy_ground = None
+        if sog is not None and cog is not None:
+            speed_mps = sog * 1852.0 / 3600.0
+            cog_rad = np.deg2rad(cog)
+            vx_ground = speed_mps * np.sin(cog_rad)
+            vy_ground = speed_mps * np.cos(cog_rad)
+
+        records.append({
+            'ais_id': mmsi,
+            'track_id': track_id,
+            'mmsi': mmsi,
+            'x': float(now['x']),
+            'y': float(now['y']),
+            'timestamp': float(now['timestamp']),
+            'speed': sog,
+            'course': cog,
+            'heading': None if 'heading' not in now or pd.isna(now['heading']) else float(now['heading']),
+            'vx': vx,
+            'vy': vy,
+            'vx_ground': vx_ground,
+            'vy_ground': vy_ground,
+            'speed_variance': speed_variance,
+            'continuity': continuity,
+            'reliability': 1.0,
+            'lon': None if 'lon' not in now or pd.isna(now['lon']) else float(now['lon']),
+            'lat': None if 'lat' not in now or pd.isna(now['lat']) else float(now['lat']),
+        })
+
+    return records
+
+
 class VISPRO(object):
     def __init__(self, anti, val, t):
         self.anti = anti
@@ -224,7 +312,21 @@ class VISPRO(object):
         bboxes = yolo.detect_image(im0)
         return bboxes
 
-    def track(self, image, bboxes, bboxes_anti_occ, id_list, timestamp):
+    def bind_ais_tracks(self, ais_records):
+        ais_frame = AISFrame(ais_records)
+        obs_by_id = ais_frame.by_id()
+        obs_by_track = {
+            int(record['track_id']): obs_by_id.get(record['ais_id'])
+            for record in ais_records
+        }
+        for track in self.tracker.tracked_stracks + self.tracker.lost_stracks:
+            if int(track.track_id) not in obs_by_track:
+                continue
+            obs = obs_by_track[int(track.track_id)]
+            if obs is not None:
+                track.bind_ais(obs.ais_id, obs=obs, frame_id=self.tracker.frame_id)
+
+    def track(self, image, bboxes, bboxes_anti_occ, id_list, timestamp, ais_frame=None):
         detections = []
         for x1, y1, x2, y2, _, conf in bboxes:
             if x2 <= x1 or y2 <= y1:
@@ -234,21 +336,15 @@ class VISPRO(object):
                 float(conf), 1.0, 0.0
             ])
 
-        # 前端注入：将抗遮挡预测框作为高置信度虚拟检测框送入BoT-SORT，用于维持原ID存活
-        for x1, y1, x2, y2, _, conf in bboxes_anti_occ:
-            if x2 <= x1 or y2 <= y1:
-                continue
-            detections.append([
-                float(x1), float(y1), float(x2), float(y2),
-                float(conf), 1.0, 0.0
-            ])
-
+        # 鍓嶇娉ㄥ叆锛氬皢鎶楅伄鎸￠娴嬫浣滀负楂樼疆淇″害铏氭嫙妫€娴嬫閫佸叆BoT-SORT锛岀敤浜庣淮鎸佸師ID瀛樻椿
         if len(detections):
             output_results = np.asarray(detections, dtype=float)
         else:
             output_results = np.empty((0, 7), dtype=float)
 
-        online_targets = self.tracker.update(output_results, image)
+        self.bind_ais_tracks(ais_frame if ais_frame is not None else [])
+        online_targets = self.tracker.update(
+            output_results, image, ais_frame=ais_frame, timestamp=timestamp)
         for target in list(online_targets):
             x1, y1, w, h = np.asarray(target.tlwh, dtype=float)
             if w <= 0 or h <= 0:
@@ -256,11 +352,6 @@ class VISPRO(object):
             x2 = x1 + w
             y2 = y1 + h
             track_id = int(target.track_id)
-            if track_id in id_list:
-                idx = id_list.index(track_id)
-                # 后端覆盖：遮挡ID输出时使用抗遮挡预测框坐标，纠正KF漂移
-                if idx < len(bboxes_anti_occ):
-                    x1, y1, x2, y2, _, _ = bboxes_anti_occ[idx]
             self.Vis_tra_cur_3 = self.Vis_tra_cur_3.append({'ID':track_id,\
                 'x1':int(x1),'y1':int(y1),'x2':int(x2),'y2':int(y2),'x':int((x1 + x2) / 2),\
                     'y':int((y1 + y2) / 2), 'timestamp':timestamp//1000}, ignore_index=True)
@@ -403,7 +494,6 @@ class VISPRO(object):
                 embed()
         return bboxes_anti_occ
 
-        
     def feedCap(self, image, timestamp, AIS_vis, bind_inf):
         # 情况1: 当前时刻需要进行检测
         if timestamp % 1000 < self.t:
@@ -413,11 +503,13 @@ class VISPRO(object):
             # print(bboxes)
             # 1.2.抗遮挡
             bboxes_anti_occ = self.anti_occ(self.last5_vis_tra_list, bboxes, AIS_vis, bind_inf, timestamp // 1000)
+            ais_frame = _latest_bound_ais_records(AIS_vis, bind_inf, timestamp // 1000)
 
             # 1.3.BoT-SORT跟踪
             # print(bboxes_anti_occ)
             self.track(image, bboxes, bboxes_anti_occ=bboxes_anti_occ,\
-                    id_list=self.OAR_ids_list, timestamp=timestamp // 1000)
+                    id_list=self.OAR_ids_list, timestamp=timestamp // 1000,
+                    ais_frame=ais_frame)
 
             # 轨迹数据更新
             Vis_tra_cur = self.Vis_tra_cur
